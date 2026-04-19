@@ -1,6 +1,5 @@
 fastmcp>=3.0.0,<4
-simple-salesforce==1.12.6
-requests==2.32.3
-gunicorn==23.0.0
-uvicorn[standard]==0.30.0
-python-dotenv==1.0.1
+simple-salesforce>=1.12
+requests>=2.32
+uvicorn[standard]>=0.35
+python-dotenv>=1.1
