@@ -23,11 +23,14 @@ Output (copy the REFRESH_TOKEN line into Railway):
     SF_REFRESH_TOKEN=<long_token>
     SF_INSTANCE_URL=<your instance url>
 """
+import base64
+import hashlib
 import os
+import secrets
 import sys
 import threading
 import webbrowser
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
@@ -83,8 +86,18 @@ def main():
 
     login_host = instance_url or "https://login.salesforce.com"
 
-    # Step 1: Start local HTTP server to catch callback
-    server = HTTPServer(("127.0.0.1", CALLBACK_PORT), CallbackHandler)
+    # PKCE: required when the Connected App has "Require Proof Key for Code
+    # Exchange" enabled. Cheap to always include, so we do.
+    code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(64)).decode().rstrip("=")
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode()).digest()
+    ).decode().rstrip("=")
+
+    # Step 1: Start local HTTP server to catch callback. ThreadingHTTPServer so
+    # one stuck connection doesn't block subsequent requests (the redirect
+    # response can race with the same browser opening dev-tools or favicon
+    # requests on the same port).
+    server = ThreadingHTTPServer(("127.0.0.1", CALLBACK_PORT), CallbackHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     print(f"Listening for callback on http://localhost:{CALLBACK_PORT}{CALLBACK_PATH}")
@@ -95,6 +108,8 @@ def main():
         "client_id": client_id,
         "redirect_uri": f"http://localhost:{CALLBACK_PORT}{CALLBACK_PATH}",
         "scope": "api refresh_token offline_access",
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
         # Prompt=login forces fresh login (optional, safer)
         "prompt": "login consent",
     })
@@ -133,6 +148,7 @@ def main():
             "client_id": client_id,
             "client_secret": client_secret,
             "redirect_uri": f"http://localhost:{CALLBACK_PORT}{CALLBACK_PATH}",
+            "code_verifier": code_verifier,
         },
         timeout=30,
     )
