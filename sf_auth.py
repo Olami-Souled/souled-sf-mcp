@@ -1,14 +1,19 @@
 """
 Salesforce authentication helper.
 
-Supports two modes:
+Supports three modes (tried in order):
   1. Session ID (for local dev) — pass SF_SESSION_ID + SF_INSTANCE_URL
-  2. OAuth refresh token (for production) — pass SF_CLIENT_ID, SF_CLIENT_SECRET,
+  2. JWT Bearer (preferred for prod) — pass SF_CONSUMER_KEY, SF_PRIVATE_KEY,
+     SF_USERNAME. Immune to password changes.
+  3. OAuth refresh token — pass SF_CLIENT_ID, SF_CLIENT_SECRET,
      SF_REFRESH_TOKEN, SF_INSTANCE_URL
+  4. Username-Password — pass SF_USERNAME + SF_PASSWORD (+ SF_SECURITY_TOKEN)
 
 Uses simple-salesforce under the hood. Caches an authenticated client and
-refreshes access tokens via the refresh_token grant when needed.
+refreshes on a TTL.
 """
+import base64
+import json
 import os
 import time
 import logging
@@ -50,7 +55,13 @@ class SFAuth:
                 instance_url=os.environ["SF_INSTANCE_URL"],
             )
 
-        # Mode 2: Refresh token (production, preferred)
+        # Mode 2: JWT Bearer (preferred for prod — immune to password changes)
+        if os.environ.get("SF_CONSUMER_KEY") and os.environ.get("SF_PRIVATE_KEY") and os.environ.get("SF_USERNAME"):
+            logger.info("Building SF client via JWT Bearer")
+            access_token, instance_url = self._jwt_bearer()
+            return Salesforce(session_id=access_token, instance_url=instance_url)
+
+        # Mode 3: Refresh token
         if os.environ.get("SF_REFRESH_TOKEN"):
             client_id = os.environ["SF_CLIENT_ID"]
             client_secret = os.environ["SF_CLIENT_SECRET"]
@@ -80,6 +91,37 @@ class SFAuth:
             "  2. SF_CLIENT_ID + SF_CLIENT_SECRET + SF_REFRESH_TOKEN + SF_INSTANCE_URL (refresh token)\n"
             "  3. SF_USERNAME + SF_PASSWORD + SF_SECURITY_TOKEN + SF_CLIENT_ID + SF_CLIENT_SECRET (password grant)"
         )
+
+    @staticmethod
+    def _jwt_bearer() -> tuple[str, str]:
+        """Exchange a signed JWT assertion for an SF access token (JWT Bearer Flow)."""
+        import hmac, hashlib
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+        consumer_key = os.environ["SF_CONSUMER_KEY"]
+        username = os.environ["SF_USERNAME"]
+        private_key_pem = os.environ["SF_PRIVATE_KEY"].encode()
+        header = base64.urlsafe_b64encode(json.dumps({"alg": "RS256", "typ": "JWT"}).encode()).rstrip(b"=")
+        payload = base64.urlsafe_b64encode(json.dumps({
+            "iss": consumer_key,
+            "sub": username,
+            "aud": "https://login.salesforce.com",
+            "exp": int(time.time()) + 180,
+        }).encode()).rstrip(b"=")
+        signing_input = header + b"." + payload
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+        key = load_pem_private_key(private_key_pem, password=None)
+        sig = key.sign(signing_input, asym_padding.PKCS1v15(), hashes.SHA256())
+        assertion = (signing_input + b"." + base64.urlsafe_b64encode(sig).rstrip(b"=")).decode()
+        resp = requests.post(
+            "https://login.salesforce.com/services/oauth2/token",
+            data={"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": assertion},
+            timeout=30,
+        )
+        if not resp.ok:
+            raise RuntimeError(f"SF JWT auth failed ({resp.status_code}): {resp.text}")
+        d = resp.json()
+        return d["access_token"], d["instance_url"]
 
     @staticmethod
     def _refresh_access_token(client_id, client_secret, refresh_token, instance_url) -> str:

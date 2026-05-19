@@ -1,5 +1,6 @@
 fastmcp>=3.0.0,<4
 simple-salesforce>=1.12
+cryptography>=3.0
 requests>=2.32
 uvicorn[standard]>=0.35
 python-dotenv>=1.1
