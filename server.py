@@ -42,6 +42,12 @@ EXPECTED_BEARER = os.environ.get("MCP_BEARER_TOKEN", "")
 
 
 class BearerAuthMiddleware(BaseHTTPMiddleware):
+    """
+    Accept either:
+      - Authorization: Bearer <token>   (for API clients like FastMCP Client)
+      - ?k=<token> in the URL            (for claude.ai custom connector, which
+         has no native Bearer field; the token is embedded in the URL)
+    """
     async def dispatch(self, request: Request, call_next):
         # Allow the health check through without auth so Railway can poll it
         if request.url.path in ("/", "/health"):
@@ -53,12 +59,19 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                 status_code=500,
             )
 
+        token = None
+
+        # Check Authorization header first
         auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer "):
-            return JSONResponse({"error": "missing bearer token"}, status_code=401)
-        token = auth[len("Bearer "):].strip()
-        if token != EXPECTED_BEARER:
-            return JSONResponse({"error": "invalid bearer token"}, status_code=401)
+        if auth.startswith("Bearer "):
+            token = auth[len("Bearer "):].strip()
+
+        # Fallback to URL query parameter
+        if not token:
+            token = request.query_params.get("k", "")
+
+        if not token or token != EXPECTED_BEARER:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
 
         return await call_next(request)
 
@@ -184,13 +197,10 @@ async def health(request: Request) -> JSONResponse:
         "has_bearer_token": bool(EXPECTED_BEARER),
         "has_sf_creds": bool(
             os.environ.get("SF_SESSION_ID")
-            or (
-                os.environ.get("SF_CLIENT_ID")
-                and os.environ.get("SF_CLIENT_SECRET")
-                and os.environ.get("SF_REFRESH_TOKEN")
-            )
+            or (os.environ.get("SF_CLIENT_ID") and os.environ.get("SF_CLIENT_SECRET") and os.environ.get("SF_REFRESH_TOKEN"))
+            or (os.environ.get("SF_CONSUMER_KEY") and os.environ.get("SF_PRIVATE_KEY") and os.environ.get("SF_USERNAME"))
         ),
-        "has_instance_url": bool(os.environ.get("SF_INSTANCE_URL")),
+        "has_instance_url": bool(os.environ.get("SF_INSTANCE_URL") or os.environ.get("SF_CONSUMER_KEY")),
     })
 
 
